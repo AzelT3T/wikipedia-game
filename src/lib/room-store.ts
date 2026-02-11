@@ -174,11 +174,6 @@ export function applyPlayerMove(roomId: string, playerId: string, nextTitle: str
 
     if (!room.winnerId) {
       room.winnerId = player.id;
-    }
-
-    const allFinished = Object.values(room.players).every((roomPlayer) => Boolean(roomPlayer.finishedAt));
-
-    if (allFinished) {
       room.status = "finished";
     }
   }
