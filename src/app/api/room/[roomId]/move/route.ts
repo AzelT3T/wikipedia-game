@@ -1,7 +1,7 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { applyPlayerMove, getRoom } from "@/lib/room-store";
 import { serializeRoomForClient } from "@/lib/room-api";
-import { fetchArticleSnapshot } from "@/lib/wikipedia";
+import { hasDirectLink } from "@/lib/wikipedia";
 
 export async function POST(
   request: NextRequest,
@@ -30,9 +30,9 @@ export async function POST(
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
 
-    const article = await fetchArticleSnapshot(player.currentTitle, 300);
+    const linkExists = await hasDirectLink(player.currentTitle, toTitle);
 
-    if (!article.links.includes(toTitle)) {
+    if (!linkExists) {
       return NextResponse.json({ error: "INVALID_MOVE" }, { status: 400 });
     }
 

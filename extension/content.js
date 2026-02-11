@@ -408,8 +408,7 @@
     }
 
     if (state.versus.localPath.length === 0) {
-      const refTitle = currentReferrerTitle();
-      state.versus.localPath = refTitle && refTitle !== serverCurrent ? [serverCurrent, refTitle] : [serverCurrent];
+      state.versus.localPath = [serverCurrent];
       state.versus.localLastTitle = serverCurrent;
       changed = true;
     }
@@ -445,6 +444,14 @@
           throw error;
         }
 
+        const invalidIndex = state.versus.localPath.indexOf(nextTitle, serverIndex + 1);
+
+        if (invalidIndex >= 0) {
+          state.versus.localPath.splice(invalidIndex, 1);
+          state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
+          changed = true;
+        }
+
         if (
           nextRoom
           && nextRoom.startAt
@@ -458,7 +465,7 @@
           changed = true;
         }
 
-        break;
+        continue;
       }
     }
 

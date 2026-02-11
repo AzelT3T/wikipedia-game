@@ -4,6 +4,7 @@ import { unique } from "./utils";
 const WIKI_API = "https://ja.wikipedia.org/w/api.php";
 const ARTICLE_CACHE_MS = 10 * 60 * 1000;
 const BACKLINK_CACHE_MS = 5 * 60 * 1000;
+const EDGE_CACHE_MS = 5 * 60 * 1000;
 
 interface CacheEntry<T> {
   value: T;
@@ -48,13 +49,16 @@ interface ArticleResponse {
 declare global {
   var __wikiArticleCache: Map<string, CacheEntry<ArticleSnapshot>> | undefined;
   var __wikiBacklinkCache: Map<string, CacheEntry<string[]>> | undefined;
+  var __wikiEdgeCache: Map<string, CacheEntry<boolean>> | undefined;
 }
 
 const articleCache = globalThis.__wikiArticleCache ?? new Map<string, CacheEntry<ArticleSnapshot>>();
 const backlinkCache = globalThis.__wikiBacklinkCache ?? new Map<string, CacheEntry<string[]>>();
+const edgeCache = globalThis.__wikiEdgeCache ?? new Map<string, CacheEntry<boolean>>();
 
 globalThis.__wikiArticleCache = articleCache;
 globalThis.__wikiBacklinkCache = backlinkCache;
+globalThis.__wikiEdgeCache = edgeCache;
 
 function normalizeTitle(title: string): string {
   return title.replace(/_/g, " ").trim();
@@ -230,6 +234,61 @@ export async function fetchArticleSnapshot(title: string, maxLinks = 300): Promi
   articleCache.set(cacheKey, { value: snapshot, expiresAt: Date.now() + ARTICLE_CACHE_MS });
 
   return snapshot;
+}
+
+export async function hasDirectLink(
+  fromTitle: string,
+  toTitle: string,
+  scanLimit = 4500
+): Promise<boolean> {
+  const from = normalizeTitle(fromTitle);
+  const to = normalizeTitle(toTitle);
+  const cacheKey = `${from}->${to}:${scanLimit}`;
+  const cached = edgeCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  let plcontinue: string | undefined;
+  let scanned = 0;
+
+  while (scanned < scanLimit) {
+    const json = await fetchWikiJson<ArticleResponse>({
+      action: "query",
+      prop: "links",
+      plnamespace: "0",
+      pllimit: "max",
+      titles: from,
+      ...(plcontinue ? { plcontinue } : {}),
+    });
+
+    const page = json?.query?.pages?.[0];
+
+    if (!page || page.missing) {
+      edgeCache.set(cacheKey, { value: false, expiresAt: Date.now() + EDGE_CACHE_MS });
+      return false;
+    }
+
+    const links = Array.isArray(page.links) ? page.links : [];
+    scanned += links.length;
+
+    for (const link of links) {
+      if (normalizeTitle(link.title) === to) {
+        edgeCache.set(cacheKey, { value: true, expiresAt: Date.now() + EDGE_CACHE_MS });
+        return true;
+      }
+    }
+
+    if (!json?.continue?.plcontinue) {
+      break;
+    }
+
+    plcontinue = json.continue.plcontinue;
+  }
+
+  edgeCache.set(cacheKey, { value: false, expiresAt: Date.now() + EDGE_CACHE_MS });
+  return false;
 }
 
 export async function hasPathWithinDepth(
