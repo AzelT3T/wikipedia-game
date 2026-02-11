@@ -205,17 +205,83 @@
     return next;
   }
 
+  function isContextInvalidatedMessage(message) {
+    return typeof message === "string" && message.includes("Extension context invalidated");
+  }
+
+  function isExtensionApiAvailable() {
+    return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+  }
+
   function loadState() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(STORAGE_KEY, (result) => {
-        resolve(result?.[STORAGE_KEY] ?? null);
-      });
+      if (!isExtensionApiAvailable()) {
+        resolve(null);
+        return;
+      }
+
+      try {
+        chrome.storage.local.get(STORAGE_KEY, (result) => {
+          const runtimeError = chrome.runtime.lastError;
+
+          if (runtimeError) {
+            const message = runtimeError.message || "";
+
+            if (!isContextInvalidatedMessage(message)) {
+              console.warn("loadState failed:", message);
+            }
+
+            resolve(null);
+            return;
+          }
+
+          resolve(result?.[STORAGE_KEY] ?? null);
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        if (!isContextInvalidatedMessage(message)) {
+          console.warn("loadState threw:", message);
+        }
+
+        resolve(null);
+      }
     });
   }
 
   function persistState() {
     return new Promise((resolve) => {
-      chrome.storage.local.set({ [STORAGE_KEY]: state }, resolve);
+      if (!isExtensionApiAvailable()) {
+        resolve(false);
+        return;
+      }
+
+      try {
+        chrome.storage.local.set({ [STORAGE_KEY]: state }, () => {
+          const runtimeError = chrome.runtime.lastError;
+
+          if (runtimeError) {
+            const message = runtimeError.message || "";
+
+            if (!isContextInvalidatedMessage(message)) {
+              console.warn("persistState failed:", message);
+            }
+
+            resolve(false);
+            return;
+          }
+
+          resolve(true);
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        if (!isContextInvalidatedMessage(message)) {
+          console.warn("persistState threw:", message);
+        }
+
+        resolve(false);
+      }
     });
   }
 
@@ -519,10 +585,19 @@
   }
 
   function setError(message) {
+    if (message === "EXTENSION_CONTEXT_INVALIDATED") {
+      state.ui.error = "拡張機能を再読み込みしたため無効化されました。Wikipediaタブを再読み込みしてください。";
+      return;
+    }
+
     state.ui.error = message;
   }
 
   async function apiFetch(path, options = {}) {
+    if (!isExtensionApiAvailable()) {
+      throw new Error("EXTENSION_CONTEXT_INVALIDATED");
+    }
+
     const payload = {
       type: "wiki-race-api",
       baseUrl: state.settings.apiBaseUrl || DEFAULT_API_BASE,
@@ -533,14 +608,32 @@
     };
 
     const response = await new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(payload, (result) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+      try {
+        chrome.runtime.sendMessage(payload, (result) => {
+          if (chrome.runtime.lastError) {
+            const message = chrome.runtime.lastError.message || "";
+
+            if (isContextInvalidatedMessage(message)) {
+              reject(new Error("EXTENSION_CONTEXT_INVALIDATED"));
+              return;
+            }
+
+            reject(new Error(message));
+            return;
+          }
+
+          resolve(result);
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        if (isContextInvalidatedMessage(message)) {
+          reject(new Error("EXTENSION_CONTEXT_INVALIDATED"));
           return;
         }
 
-        resolve(result);
-      });
+        reject(new Error(message));
+      }
     });
 
     if (!response || !response.ok) {
