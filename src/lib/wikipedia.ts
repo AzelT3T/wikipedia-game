@@ -5,10 +5,24 @@ const WIKI_API = "https://ja.wikipedia.org/w/api.php";
 const ARTICLE_CACHE_MS = 10 * 60 * 1000;
 const BACKLINK_CACHE_MS = 5 * 60 * 1000;
 const EDGE_CACHE_MS = 5 * 60 * 1000;
+const WIKI_TIMEOUT_MS = 12_000;
+const WIKI_MAX_RETRIES = 4;
+const WIKI_MIN_INTERVAL_MS = 180;
+const WIKI_MAX_RETRY_WAIT_MS = 10_000;
+const WIKI_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const WIKI_API_USER_AGENT =
+  typeof process !== "undefined" && process.env.WIKI_API_USER_AGENT?.trim()
+    ? process.env.WIKI_API_USER_AGENT.trim()
+    : "wikipedia-game/0.1 (self-hosted wiki link race)";
 
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
+}
+
+interface WikiRateGate {
+  nextAt: number;
+  blockedUntil: number;
 }
 
 interface RandomResponse {
@@ -47,15 +61,18 @@ interface ArticleResponse {
 }
 
 declare global {
+  var __wikiRateGate: WikiRateGate | undefined;
   var __wikiArticleCache: Map<string, CacheEntry<ArticleSnapshot>> | undefined;
   var __wikiBacklinkCache: Map<string, CacheEntry<string[]>> | undefined;
   var __wikiEdgeCache: Map<string, CacheEntry<boolean>> | undefined;
 }
 
+const wikiRateGate = globalThis.__wikiRateGate ?? { nextAt: 0, blockedUntil: 0 };
 const articleCache = globalThis.__wikiArticleCache ?? new Map<string, CacheEntry<ArticleSnapshot>>();
 const backlinkCache = globalThis.__wikiBacklinkCache ?? new Map<string, CacheEntry<string[]>>();
 const edgeCache = globalThis.__wikiEdgeCache ?? new Map<string, CacheEntry<boolean>>();
 
+globalThis.__wikiRateGate = wikiRateGate;
 globalThis.__wikiArticleCache = articleCache;
 globalThis.__wikiBacklinkCache = backlinkCache;
 globalThis.__wikiEdgeCache = edgeCache;
@@ -86,6 +103,60 @@ function cleanTitles(titles: string[]): string[] {
   );
 }
 
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function parseRetryAfterMs(retryAfter: string | null): number | null {
+  if (!retryAfter) {
+    return null;
+  }
+
+  const numericSeconds = Number(retryAfter);
+
+  if (Number.isFinite(numericSeconds) && numericSeconds >= 0) {
+    return Math.floor(numericSeconds * 1000);
+  }
+
+  const dateMs = Date.parse(retryAfter);
+
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  return null;
+}
+
+function getRetryDelayMs(status: number, attempt: number, retryAfter: string | null): number {
+  const headerDelayMs = parseRetryAfterMs(retryAfter);
+
+  if (headerDelayMs !== null) {
+    return Math.min(WIKI_MAX_RETRY_WAIT_MS, headerDelayMs);
+  }
+
+  const base = status === 429 ? 900 : 350;
+  const jitter = Math.floor(Math.random() * 220);
+  return Math.min(WIKI_MAX_RETRY_WAIT_MS, base * 2 ** attempt + jitter);
+}
+
+async function waitForWikiRequestSlot() {
+  const now = Date.now();
+  const earliest = Math.max(now, wikiRateGate.nextAt, wikiRateGate.blockedUntil);
+  const waitMs = earliest - now;
+
+  wikiRateGate.nextAt = earliest + WIKI_MIN_INTERVAL_MS;
+
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+}
+
 async function fetchWikiJson<T>(params: Record<string, string>): Promise<T> {
   const url = new URL(WIKI_API);
 
@@ -98,24 +169,65 @@ async function fetchWikiJson<T>(params: Record<string, string>): Promise<T> {
     url.searchParams.set(key, value);
   });
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  for (let attempt = 0; attempt <= WIKI_MAX_RETRIES; attempt += 1) {
+    await waitForWikiRequestSlot();
 
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      signal: controller.signal,
-      cache: "no-store",
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WIKI_TIMEOUT_MS);
 
-    if (!response.ok) {
-      throw new Error(`Wikipedia API request failed: ${response.status}`);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        signal: controller.signal,
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Api-User-Agent": WIKI_API_USER_AGENT,
+          "User-Agent": WIKI_API_USER_AGENT,
+        },
+      });
+
+      if (response.ok) {
+        return (await response.json()) as T;
+      }
+
+      const status = response.status;
+      const retryAfter = response.headers.get("retry-after");
+      const canRetry = WIKI_RETRYABLE_STATUS.has(status) && attempt < WIKI_MAX_RETRIES;
+
+      if (canRetry) {
+        const retryDelayMs = getRetryDelayMs(status, attempt, retryAfter);
+
+        if (status === 429) {
+          wikiRateGate.blockedUntil = Math.max(
+            wikiRateGate.blockedUntil,
+            Date.now() + retryDelayMs
+          );
+        }
+
+        await sleep(retryDelayMs);
+        continue;
+      }
+
+      throw new Error(`Wikipedia API request failed: ${status}`);
+    } catch (error) {
+      const isAbortError = error instanceof DOMException && error.name === "AbortError";
+      const message = error instanceof Error ? error.message : String(error);
+      const isTransientNetworkError =
+        isAbortError || message.includes("fetch failed") || message.includes("network");
+
+      if (attempt < WIKI_MAX_RETRIES && isTransientNetworkError) {
+        await sleep(getRetryDelayMs(503, attempt, null));
+        continue;
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return (await response.json()) as T;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw new Error("Wikipedia API request failed");
 }
 
 export function toArticleUrl(title: string): string {

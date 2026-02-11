@@ -44,13 +44,19 @@ export async function POST(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to process move";
+    const isWikiRateLimited = message.includes("429");
     const status =
       message === "ROOM_NOT_FOUND" || message === "PLAYER_NOT_FOUND"
         ? 404
         : message === "ROOM_NOT_RUNNING" || message === "RACE_NOT_STARTED"
           ? 400
-          : 500;
+          : isWikiRateLimited
+            ? 503
+            : 500;
 
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json(
+      { error: isWikiRateLimited ? "WIKIPEDIA_RATE_LIMITED_RETRY" : message },
+      { status }
+    );
   }
 }

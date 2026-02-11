@@ -506,6 +506,11 @@
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
 
+        if (message.includes("WIKIPEDIA_RATE_LIMITED_RETRY") || message.includes("429")) {
+          setNotice("Wikipedia APIが混雑中です。数秒後に自動再試行します。");
+          break;
+        }
+
         if (!message.includes("INVALID_MOVE")) {
           throw error;
         }
@@ -587,6 +592,11 @@
   function setError(message) {
     if (message === "EXTENSION_CONTEXT_INVALIDATED") {
       state.ui.error = "拡張機能を再読み込みしたため無効化されました。Wikipediaタブを再読み込みしてください。";
+      return;
+    }
+
+    if (message === "WIKIPEDIA_RATE_LIMITED_RETRY" || message.includes("429")) {
+      state.ui.error = "Wikipedia APIのレート制限に達しました。少し待ってから再試行してください。";
       return;
     }
 
