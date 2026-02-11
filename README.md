@@ -1,36 +1,49 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+﻿# Wiki Link Race
 
-## Getting Started
+Wikipedia の内部リンクだけを使って `Start -> Goal` へ到達するタイムを競うゲームです。
 
-First, run the development server:
+## Modes
+
+- Solo: 1人でタイムアタック
+- Versus: 招待リンクで2人対戦
+
+## Rules
+
+- スタートページとゴールページはサーバーで生成
+- ゴールは著名語寄り
+- スタートはランダム性が高く、難解語を含む場合あり
+- 難易度 (`easy / normal / hard`) に応じて想定リンク距離を調整
+
+## Tech
+
+- Next.js (App Router) + TypeScript
+- MediaWiki API (ja.wikipedia.org)
+- インメモリのルーム管理 (MVP)
+
+## Run
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open: `http://localhost:3000`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Wikipedia Overlay Extension (MV3)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `extension/` に Chrome/Edge 用の MV3 拡張が含まれています。
+- Wikipedia ページ上にソロ/対戦オーバーレイを表示します。
+- 読み込み手順は `extension/README.md` を参照してください。
 
-## Learn More
+## Build / Lint
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run lint
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- 対戦ルーム情報はサーバープロセスのメモリに保持されます。
+- サーバー再起動でルームは消えます。
+- 同時接続や永続化が必要な場合は DB + Realtime へ置き換えてください。

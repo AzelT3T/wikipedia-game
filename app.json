@@ -1,0 +1,16 @@
+{
+  "name": "wiki-link-race",
+  "description": "Wikipedia link race game (solo / versus)",
+  "keywords": [
+    "nextjs",
+    "wikipedia",
+    "game"
+  ],
+  "env": {},
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
