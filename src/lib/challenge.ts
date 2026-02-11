@@ -35,6 +35,10 @@ const goalCache =
 
 globalThis.__goalCache = goalCache;
 
+function normalizeTitle(title: string): string {
+  return title.replace(/_/g, " ").trim();
+}
+
 async function generateBacklinkChain(goalTitle: string, distance: number): Promise<string[] | null> {
   const path = [goalTitle];
   const used = new Set<string>([goalTitle]);
@@ -65,17 +69,23 @@ async function resolveCanonicalGoalTitle(goalTitle: string): Promise<string | nu
   }
 }
 
-async function pickExistingGoalTitle(difficulty: Difficulty, deadline: number): Promise<string | null> {
+async function pickExistingGoalTitle(
+  difficulty: Difficulty,
+  deadline: number,
+  excludedGoals: Set<string> = new Set<string>()
+): Promise<string | null> {
   const verified = goalCache.verifiedByDifficulty[difficulty];
+  const verifiedOptions = [...verified].filter((title) => !excludedGoals.has(normalizeTitle(title)));
 
-  if (verified.size > 0) {
-    return pickOne([...verified]);
+  if (verifiedOptions.length > 0) {
+    return pickOne(verifiedOptions);
   }
 
   const pool = getGoalPool(difficulty);
   const attempted = new Set<string>();
+  const maxAttempts = Math.min(pool.length, 12);
 
-  for (let index = 0; index < 7; index += 1) {
+  for (let index = 0; index < maxAttempts; index += 1) {
     if (Date.now() > deadline) {
       break;
     }
@@ -91,8 +101,15 @@ async function pickExistingGoalTitle(difficulty: Difficulty, deadline: number): 
 
     if (canonical) {
       verified.add(canonical);
-      return canonical;
+
+      if (!excludedGoals.has(normalizeTitle(canonical))) {
+        return canonical;
+      }
     }
+  }
+
+  if (verifiedOptions.length > 0) {
+    return pickOne(verifiedOptions);
   }
 
   if (verified.size > 0) {
@@ -110,16 +127,26 @@ export function difficultyDistanceLabel(difficulty: Difficulty): string {
   return `${min}-${max} hops`;
 }
 
-export async function generateChallenge(difficulty: Difficulty): Promise<Challenge> {
+interface GenerateChallengeOptions {
+  excludeGoalTitles?: string[];
+}
+
+export async function generateChallenge(
+  difficulty: Difficulty,
+  options: GenerateChallengeOptions = {}
+): Promise<Challenge> {
   const config = DIFFICULTY_CONFIG[difficulty];
   const deadline = Date.now() + CHALLENGE_TIME_BUDGET_MS;
+  const excludedGoals = new Set(
+    (options.excludeGoalTitles ?? []).map((title) => normalizeTitle(String(title)))
+  );
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (Date.now() > deadline) {
       break;
     }
 
-    const goalTitle = await pickExistingGoalTitle(difficulty, deadline);
+    const goalTitle = await pickExistingGoalTitle(difficulty, deadline, excludedGoals);
 
     if (!goalTitle) {
       continue;
@@ -162,7 +189,9 @@ export async function generateChallenge(difficulty: Difficulty): Promise<Challen
     };
   }
 
-  const fallbackGoal = (await pickExistingGoalTitle(difficulty, Date.now() + 1_500)) ?? "Wikipedia";
+  const fallbackGoal = (
+    await pickExistingGoalTitle(difficulty, Date.now() + 1_500, excludedGoals)
+  ) ?? "Wikipedia";
   let fallbackStart = await fetchRandomTitle();
 
   for (let attempt = 0; attempt < 6 && fallbackStart === fallbackGoal; attempt += 1) {

@@ -25,7 +25,9 @@ export async function POST(
     }
 
     const difficulty = parseDifficulty(body?.difficulty ?? room.challenge.difficulty);
-    const challenge = await generateChallenge(difficulty);
+    const challenge = await generateChallenge(difficulty, {
+      excludeGoalTitles: [room.challenge.goalTitle],
+    });
     const updated = startNextRound(roomId, playerId, challenge);
 
     return NextResponse.json({ room: serializeRoomForClient(updated) });
