@@ -1,7 +1,7 @@
 ﻿import { getGoalPool } from "./goal-pool";
 import { Challenge, Difficulty } from "./types";
 import { pickOne } from "./utils";
-import { fetchArticleSnapshot, fetchBacklinks, fetchRandomTitle, hasPathWithinDepth } from "./wikipedia";
+import { fetchBacklinks, fetchRandomTitle, hasPathWithinDepth } from "./wikipedia";
 
 interface DifficultyConfig {
   distanceCandidates: number[];
@@ -15,12 +15,12 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
 };
 
 const CHALLENGE_TIME_BUDGET_MS = 11_000;
-const GOAL_CACHE_TARGET_SIZE = 8;
-const GOAL_VERIFY_ATTEMPTS_PER_CALL = 4;
+const GOAL_RECENT_WINDOW = 20;
 
 interface GoalCache {
-  verifiedByDifficulty: Record<Difficulty, Set<string>>;
   lastGoalByDifficulty: Record<Difficulty, string>;
+  recentGoalsByDifficulty: Record<Difficulty, string[]>;
+  goalUseCountByDifficulty: Record<Difficulty, Record<string, number>>;
 }
 
 declare global {
@@ -29,15 +29,20 @@ declare global {
 
 const goalCache =
   globalThis.__goalCache ?? {
-    verifiedByDifficulty: {
-      easy: new Set<string>(),
-      normal: new Set<string>(),
-      hard: new Set<string>(),
-    },
     lastGoalByDifficulty: {
       easy: "",
       normal: "",
       hard: "",
+    },
+    recentGoalsByDifficulty: {
+      easy: [],
+      normal: [],
+      hard: [],
+    },
+    goalUseCountByDifficulty: {
+      easy: {},
+      normal: {},
+      hard: {},
     },
   };
 
@@ -49,10 +54,62 @@ if (!goalCache.lastGoalByDifficulty) {
   };
 }
 
+if (!goalCache.recentGoalsByDifficulty) {
+  goalCache.recentGoalsByDifficulty = {
+    easy: [],
+    normal: [],
+    hard: [],
+  };
+}
+
+if (!goalCache.goalUseCountByDifficulty) {
+  goalCache.goalUseCountByDifficulty = {
+    easy: {},
+    normal: {},
+    hard: {},
+  };
+}
+
 globalThis.__goalCache = goalCache;
 
 function normalizeTitle(title: string): string {
   return title.replace(/_/g, " ").trim();
+}
+
+function pickLessUsedGoal(difficulty: Difficulty, candidates: string[]): string {
+  const usage = goalCache.goalUseCountByDifficulty[difficulty];
+  let minimumUse = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const count = usage[normalizeTitle(candidate)] ?? 0;
+
+    if (count < minimumUse) {
+      minimumUse = count;
+    }
+  }
+
+  const leastUsed = candidates.filter(
+    (candidate) => (usage[normalizeTitle(candidate)] ?? 0) === minimumUse
+  );
+
+  return pickOne(leastUsed);
+}
+
+function rememberGoalSelection(difficulty: Difficulty, goalTitle: string) {
+  const normalizedGoal = normalizeTitle(goalTitle);
+  const usage = goalCache.goalUseCountByDifficulty[difficulty];
+  const previousRecent = goalCache.recentGoalsByDifficulty[difficulty];
+  const nextRecent = previousRecent.filter((title) => normalizeTitle(title) !== normalizedGoal);
+
+  nextRecent.push(normalizedGoal);
+
+  while (nextRecent.length > GOAL_RECENT_WINDOW) {
+    nextRecent.shift();
+  }
+
+  usage[normalizedGoal] = (usage[normalizedGoal] ?? 0) + 1;
+  goalCache.recentGoalsByDifficulty[difficulty] = nextRecent;
+  goalCache.lastGoalByDifficulty[difficulty] = normalizedGoal;
 }
 
 async function generateBacklinkChain(goalTitle: string, distance: number): Promise<string[] | null> {
@@ -76,52 +133,19 @@ async function generateBacklinkChain(goalTitle: string, distance: number): Promi
   return path;
 }
 
-async function resolveCanonicalGoalTitle(goalTitle: string): Promise<string | null> {
-  try {
-    const article = await fetchArticleSnapshot(goalTitle, 8);
-    return article.title;
-  } catch {
-    return null;
-  }
-}
-
 async function pickExistingGoalTitle(
   difficulty: Difficulty,
-  deadline: number,
   excludedGoals: Set<string> = new Set<string>()
 ): Promise<string | null> {
-  const verified = goalCache.verifiedByDifficulty[difficulty];
-  const pool = getGoalPool(difficulty);
-  const attempted = new Set<string>();
-  const shouldGrowCache = verified.size < GOAL_CACHE_TARGET_SIZE;
-  const maxAttempts = Math.min(
-    pool.length,
-    shouldGrowCache ? GOAL_VERIFY_ATTEMPTS_PER_CALL + 2 : GOAL_VERIFY_ATTEMPTS_PER_CALL
-  );
+  const pool = await getGoalPool(difficulty);
+  const availablePool = pool.filter((title) => !excludedGoals.has(normalizeTitle(title)));
 
-  for (let index = 0; index < maxAttempts; index += 1) {
-    if (Date.now() > deadline) {
-      break;
-    }
-
-    const candidate = pickOne(pool);
-
-    if (attempted.has(candidate)) {
-      continue;
-    }
-
-    attempted.add(candidate);
-    const canonical = await resolveCanonicalGoalTitle(candidate);
-
-    if (canonical) {
-      verified.add(canonical);
-    }
+  if (availablePool.length > 0) {
+    return pickLessUsedGoal(difficulty, availablePool);
   }
 
-  const verifiedOptions = [...verified].filter((title) => !excludedGoals.has(normalizeTitle(title)));
-
-  if (verifiedOptions.length > 0) {
-    return pickOne(verifiedOptions);
+  if (pool.length > 0) {
+    return pickLessUsedGoal(difficulty, pool);
   }
 
   return null;
@@ -145,9 +169,13 @@ export async function generateChallenge(
 ): Promise<Challenge> {
   const config = DIFFICULTY_CONFIG[difficulty];
   const deadline = Date.now() + CHALLENGE_TIME_BUDGET_MS;
-  const excludedGoals = new Set(
+  const explicitExcludedGoals = new Set(
     (options.excludeGoalTitles ?? []).map((title) => normalizeTitle(String(title)))
   );
+  const excludedGoals = new Set<string>([
+    ...explicitExcludedGoals,
+    ...goalCache.recentGoalsByDifficulty[difficulty].map((title) => normalizeTitle(title)),
+  ]);
   const previousGoal = normalizeTitle(goalCache.lastGoalByDifficulty[difficulty] || "");
 
   if (previousGoal) {
@@ -159,7 +187,7 @@ export async function generateChallenge(
       break;
     }
 
-    const goalTitle = await pickExistingGoalTitle(difficulty, deadline, excludedGoals);
+    const goalTitle = await pickExistingGoalTitle(difficulty, excludedGoals);
 
     if (!goalTitle) {
       continue;
@@ -193,7 +221,7 @@ export async function generateChallenge(
       }
     }
 
-    goalCache.lastGoalByDifficulty[difficulty] = goalTitle;
+    rememberGoalSelection(difficulty, goalTitle);
 
     return {
       startTitle,
@@ -205,15 +233,25 @@ export async function generateChallenge(
   }
 
   let fallbackGoal = (
-    await pickExistingGoalTitle(difficulty, Date.now() + 1_500, excludedGoals)
+    await pickExistingGoalTitle(difficulty, excludedGoals)
   ) ?? null;
 
   if (!fallbackGoal && excludedGoals.size > 0) {
-    fallbackGoal = await pickExistingGoalTitle(difficulty, Date.now() + 1_000, new Set<string>());
+    const relaxedExcludedGoals = new Set(explicitExcludedGoals);
+
+    if (previousGoal) {
+      relaxedExcludedGoals.add(previousGoal);
+    }
+
+    fallbackGoal = await pickExistingGoalTitle(difficulty, relaxedExcludedGoals);
+  }
+
+  if (!fallbackGoal) {
+    fallbackGoal = await pickExistingGoalTitle(difficulty, new Set<string>());
   }
 
   fallbackGoal = fallbackGoal ?? "Wikipedia";
-  goalCache.lastGoalByDifficulty[difficulty] = fallbackGoal;
+  rememberGoalSelection(difficulty, fallbackGoal);
   let fallbackStart = await fetchRandomTitle();
 
   for (let attempt = 0; attempt < 6 && fallbackStart === fallbackGoal; attempt += 1) {

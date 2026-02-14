@@ -69,6 +69,13 @@
   }
 
   function currentTitleFromLocation() {
+    const heading = document.getElementById("firstHeading");
+    const headingTitle = heading && heading.textContent ? heading.textContent.trim() : "";
+
+    if (headingTitle) {
+      return normalizeTitle(headingTitle);
+    }
+
     if (!isWikiArticlePath(window.location.pathname)) {
       return "";
     }
@@ -80,9 +87,9 @@
     }
 
     try {
-      return decodeURIComponent(raw).replace(/_/g, " ");
+      return normalizeTitle(decodeURIComponent(raw));
     } catch {
-      return raw.replace(/_/g, " ");
+      return normalizeTitle(raw);
     }
   }
 
@@ -91,32 +98,71 @@
     return `https://ja.wikipedia.org/wiki/${slug}`;
   }
 
-  function titleFromWikiUrl(urlLike) {
-    if (typeof urlLike !== "string" || !urlLike) {
+  function normalizeTitle(title) {
+    if (typeof title !== "string") {
       return "";
     }
 
-    try {
-      const parsed = new URL(urlLike, window.location.origin);
-
-      if (!isWikiArticlePath(parsed.pathname)) {
-        return "";
-      }
-
-      const raw = parsed.pathname.replace(/^\/wiki\//, "");
-
-      if (!raw) {
-        return "";
-      }
-
-      return decodeURIComponent(raw).replace(/_/g, " ");
-    } catch {
-      return "";
-    }
+    return title.replace(/_/g, " ").replace(/\s+/g, " ").trim();
   }
 
-  function currentReferrerTitle() {
-    return titleFromWikiUrl(document.referrer);
+  function titlesMatch(left, right) {
+    const normalizedLeft = normalizeTitle(left);
+    const normalizedRight = normalizeTitle(right);
+
+    if (!normalizedLeft || !normalizedRight) {
+      return false;
+    }
+
+    return normalizedLeft === normalizedRight;
+  }
+
+  function normalizePath(path) {
+    if (!Array.isArray(path)) {
+      return [];
+    }
+
+    const normalized = [];
+
+    for (const item of path) {
+      const title = normalizeTitle(item);
+
+      if (!title) {
+        continue;
+      }
+
+      if (normalized[normalized.length - 1] !== title) {
+        normalized.push(title);
+      }
+    }
+
+    return normalized;
+  }
+
+  function reconcileLocalPathWithServerPath(serverPath, serverCurrentTitle) {
+    const currentServer = normalizeTitle(serverCurrentTitle);
+
+    if (!currentServer) {
+      return false;
+    }
+
+    const normalizedServerPath = normalizePath(serverPath);
+    const normalizedLocalPath = normalizePath(state.versus.localPath);
+    const serverIndexInLocal = normalizedLocalPath.lastIndexOf(currentServer);
+    const localTail = serverIndexInLocal >= 0 ? normalizedLocalPath.slice(serverIndexInLocal + 1) : [];
+    const merged = normalizedServerPath.length > 0 ? [...normalizedServerPath] : [currentServer];
+
+    for (const title of localTail) {
+      if (title !== merged[merged.length - 1]) {
+        merged.push(title);
+      }
+    }
+
+    const changed = JSON.stringify(normalizedLocalPath) !== JSON.stringify(merged);
+    state.versus.localPath = merged.slice(-1200);
+    state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || currentServer;
+
+    return changed;
   }
 
   function getMyPlayerFromRoom(room) {
@@ -195,8 +241,10 @@
       next.versus.playerId = typeof raw.versus.playerId === "string" ? raw.versus.playerId : "";
       next.versus.room = raw.versus.room ?? null;
       next.versus.joinRoomId = typeof raw.versus.joinRoomId === "string" ? raw.versus.joinRoomId : "";
-      next.versus.localPath = Array.isArray(raw.versus.localPath) ? raw.versus.localPath.slice(0, 1200) : [];
-      next.versus.localLastTitle = typeof raw.versus.localLastTitle === "string" ? raw.versus.localLastTitle : "";
+      next.versus.localPath = normalizePath(Array.isArray(raw.versus.localPath) ? raw.versus.localPath.slice(0, 1200) : []);
+      next.versus.localLastTitle = normalizeTitle(
+        typeof raw.versus.localLastTitle === "string" ? raw.versus.localLastTitle : ""
+      );
       next.versus.localFinishedAt = Number(raw.versus.localFinishedAt) || null;
       next.versus.round = Number(raw.versus.round) || 0;
       next.versus.autoJumpedRound = Number(raw.versus.autoJumpedRound) || 0;
@@ -404,7 +452,7 @@
 
     state.versus.autoJumpedRound = room.round;
 
-    if (currentTitle === room.challenge.startTitle) {
+    if (titlesMatch(currentTitle, room.challenge.startTitle)) {
       return false;
     }
 
@@ -413,7 +461,9 @@
   }
 
   function trackVersusLocalProgress(currentTitle) {
-    if (!state.versus.active || !currentTitle) {
+    const normalizedCurrentTitle = normalizeTitle(currentTitle);
+
+    if (!state.versus.active || !normalizedCurrentTitle) {
       return false;
     }
 
@@ -433,23 +483,26 @@
     }
 
     if (state.versus.localPath.length === 0) {
-      const refTitle = currentReferrerTitle();
-      state.versus.localPath = refTitle && refTitle !== currentTitle ? [refTitle, currentTitle] : [currentTitle];
-      state.versus.localLastTitle = currentTitle;
+      state.versus.localPath = [normalizedCurrentTitle];
+      state.versus.localLastTitle = normalizedCurrentTitle;
       changed = true;
     }
 
-    if (state.versus.localLastTitle !== currentTitle) {
-      state.versus.localLastTitle = currentTitle;
+    if (!titlesMatch(state.versus.localLastTitle, normalizedCurrentTitle)) {
+      state.versus.localLastTitle = normalizedCurrentTitle;
 
-      if (state.versus.localPath[state.versus.localPath.length - 1] !== currentTitle) {
-        state.versus.localPath.push(currentTitle);
+      if (!titlesMatch(state.versus.localPath[state.versus.localPath.length - 1], normalizedCurrentTitle)) {
+        state.versus.localPath.push(normalizedCurrentTitle);
       }
 
       changed = true;
     }
 
-    if (room?.challenge?.goalTitle && currentTitle === room.challenge.goalTitle && !state.versus.localFinishedAt) {
+    if (
+      room?.challenge?.goalTitle
+      && titlesMatch(normalizedCurrentTitle, room.challenge.goalTitle)
+      && !state.versus.localFinishedAt
+    ) {
       state.versus.localFinishedAt = nowMs();
       changed = true;
     }
@@ -464,13 +517,18 @@
       return { room, changed: false };
     }
 
-    const serverCurrent = roomMe.currentTitle;
+    let serverCurrent = normalizeTitle(roomMe.currentTitle);
+
+    if (!serverCurrent) {
+      return { room, changed: false };
+    }
+
     let changed = false;
 
-    if (Array.isArray(roomMe.path) && roomMe.path.length > 0 && state.versus.localPath.length < roomMe.path.length) {
-      state.versus.localPath = roomMe.path.slice(-1200);
-      state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
-      changed = true;
+    if (Array.isArray(roomMe.path) && roomMe.path.length > 0) {
+      if (reconcileLocalPathWithServerPath(roomMe.path, serverCurrent)) {
+        changed = true;
+      }
     }
 
     if (state.versus.localPath.length === 0) {
@@ -479,19 +537,38 @@
       changed = true;
     }
 
-    let serverIndex = state.versus.localPath.lastIndexOf(serverCurrent);
-
-    if (serverIndex < 0) {
-      state.versus.localPath = [serverCurrent, ...state.versus.localPath.slice(-30)];
-      state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
+    if (state.versus.localPath.length > 1200) {
+      state.versus.localPath = state.versus.localPath.slice(-1200);
       changed = true;
-      serverIndex = 0;
     }
 
-    const pendingTitles = state.versus.localPath.slice(serverIndex + 1);
     let nextRoom = room;
+    let loopGuard = 0;
 
-    for (const nextTitle of pendingTitles) {
+    while (loopGuard < 220) {
+      loopGuard += 1;
+      const serverIndex = state.versus.localPath.lastIndexOf(serverCurrent);
+
+      if (serverIndex < 0) {
+        const normalizedLocalPath = normalizePath(state.versus.localPath).slice(-30);
+        state.versus.localPath = [serverCurrent, ...normalizedLocalPath];
+        state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
+        changed = true;
+        continue;
+      }
+
+      const nextTitle = normalizeTitle(state.versus.localPath[serverIndex + 1] || "");
+
+      if (!nextTitle) {
+        break;
+      }
+
+      if (titlesMatch(nextTitle, serverCurrent)) {
+        state.versus.localPath.splice(serverIndex + 1, 1);
+        changed = true;
+        continue;
+      }
+
       try {
         const moveResult = await apiFetch(`/api/room/${roomId}/move`, {
           method: "POST",
@@ -502,6 +579,25 @@
         });
 
         nextRoom = moveResult.room;
+        const nextMe = nextRoom?.me ?? getMyPlayerFromRoom(nextRoom);
+
+        if (nextMe?.currentTitle) {
+          serverCurrent = normalizeTitle(nextMe.currentTitle) || nextTitle;
+        } else {
+          serverCurrent = nextTitle;
+        }
+
+        if (Array.isArray(nextMe?.path) && nextMe.path.length > 0) {
+          if (reconcileLocalPathWithServerPath(nextMe.path, serverCurrent)) {
+            changed = true;
+          }
+        }
+
+        if (nextMe?.finishedAt) {
+          changed = true;
+          break;
+        }
+
         changed = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -511,15 +607,22 @@
           break;
         }
 
+        if (message.includes("ROOM_NOT_RUNNING") || message.includes("RACE_NOT_STARTED")) {
+          break;
+        }
+
         if (!message.includes("INVALID_MOVE")) {
           throw error;
         }
 
-        const invalidIndex = state.versus.localPath.indexOf(nextTitle, serverIndex + 1);
+        const invalidIndex = state.versus.localPath.findIndex(
+          (title, index) => index > serverIndex && titlesMatch(title, nextTitle)
+        );
 
         if (invalidIndex >= 0) {
           state.versus.localPath.splice(invalidIndex, 1);
-          state.versus.localLastTitle = state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
+          state.versus.localLastTitle =
+            state.versus.localPath[state.versus.localPath.length - 1] || serverCurrent;
           changed = true;
         }
 
@@ -528,7 +631,7 @@
           && nextRoom.startAt
           && nowMs() >= nextRoom.startAt
           && nextRoom.challenge?.goalTitle
-          && nextTitle === nextRoom.challenge.goalTitle
+          && titlesMatch(nextTitle, nextRoom.challenge.goalTitle)
           && !state.versus.localFinishedAt
         ) {
           state.versus.localFinishedAt = nowMs();
@@ -657,38 +760,40 @@
   }
 
   function advanceSoloWithCurrentTitle(currentTitle) {
-    if (!state.solo.challenge || !currentTitle) {
+    const normalizedCurrentTitle = normalizeTitle(currentTitle);
+
+    if (!state.solo.challenge || !normalizedCurrentTitle) {
       return false;
     }
 
     let changed = false;
 
-    if (state.solo.phase === "awaiting_start" && currentTitle === state.solo.challenge.startTitle) {
+    if (state.solo.phase === "awaiting_start" && titlesMatch(normalizedCurrentTitle, state.solo.challenge.startTitle)) {
       state.solo.phase = "running";
       state.solo.startedAt = nowMs();
       state.solo.finishedAt = null;
-      state.solo.lastTitle = currentTitle;
-      state.solo.path = [currentTitle];
+      state.solo.lastTitle = normalizedCurrentTitle;
+      state.solo.path = [normalizedCurrentTitle];
       setNotice("ソロ開始");
       changed = true;
     }
 
     if (state.solo.phase === "running") {
       if (!state.solo.lastTitle) {
-        state.solo.lastTitle = currentTitle;
+        state.solo.lastTitle = normalizedCurrentTitle;
 
         if (state.solo.path.length === 0) {
-          state.solo.path = [currentTitle];
+          state.solo.path = [normalizedCurrentTitle];
         }
 
         changed = true;
-      } else if (state.solo.lastTitle !== currentTitle) {
-        state.solo.lastTitle = currentTitle;
-        state.solo.path.push(currentTitle);
+      } else if (!titlesMatch(state.solo.lastTitle, normalizedCurrentTitle)) {
+        state.solo.lastTitle = normalizedCurrentTitle;
+        state.solo.path.push(normalizedCurrentTitle);
         changed = true;
       }
 
-      if (currentTitle === state.solo.challenge.goalTitle && !state.solo.finishedAt) {
+      if (titlesMatch(normalizedCurrentTitle, state.solo.challenge.goalTitle) && !state.solo.finishedAt) {
         state.solo.phase = "finished";
         state.solo.finishedAt = nowMs();
         setNotice("ソロでゴール到達");
@@ -721,6 +826,14 @@
         const syncResult = await syncVersusMovesFromLocalPath(roomId, room);
         room = syncResult.room;
         changed = syncResult.changed || changed;
+      }
+
+      const meFromRoom = room?.me ?? getMyPlayerFromRoom(room);
+
+      if (meFromRoom?.currentTitle && Array.isArray(meFromRoom.path) && meFromRoom.path.length > 0) {
+        if (reconcileLocalPathWithServerPath(meFromRoom.path, meFromRoom.currentTitle)) {
+          changed = true;
+        }
       }
 
       state.versus.room = room;

@@ -1,7 +1,7 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { applyPlayerMove, getRoom } from "@/lib/room-store";
 import { serializeRoomForClient } from "@/lib/room-api";
-import { hasDirectLink } from "@/lib/wikipedia";
+import { hasDirectLink, resolveCanonicalTitle } from "@/lib/wikipedia";
 
 export async function POST(
   request: NextRequest,
@@ -30,13 +30,20 @@ export async function POST(
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
     }
 
-    const linkExists = await hasDirectLink(player.currentTitle, toTitle);
+    const canonicalCurrentTitle = await resolveCanonicalTitle(player.currentTitle);
+    const canonicalToTitle = await resolveCanonicalTitle(toTitle);
+
+    let linkExists = await hasDirectLink(canonicalCurrentTitle, toTitle);
+
+    if (!linkExists && canonicalToTitle !== toTitle) {
+      linkExists = await hasDirectLink(canonicalCurrentTitle, canonicalToTitle);
+    }
 
     if (!linkExists) {
       return NextResponse.json({ error: "INVALID_MOVE" }, { status: 400 });
     }
 
-    const updated = applyPlayerMove(roomId, playerId, toTitle);
+    const updated = applyPlayerMove(roomId, playerId, canonicalToTitle);
 
     return NextResponse.json({
       accepted: true,
