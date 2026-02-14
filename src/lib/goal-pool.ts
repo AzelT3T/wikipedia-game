@@ -1,4 +1,6 @@
-﻿import { Difficulty } from "./types";
+import { Difficulty } from "./types";
+import { unique } from "./utils";
+import { fetchExpandedGoalTitles } from "./wikipedia";
 
 const EASY_GOALS = [
   "日本",
@@ -99,19 +101,95 @@ const HARD_GOALS = [
   "分散システム",
 ];
 
-const GOAL_POOL: Record<Difficulty, string[]> = {
-  easy: EASY_GOALS,
-  normal: NORMAL_GOALS,
-  hard: HARD_GOALS,
-};
+const MIN_GOAL_POOL_SIZE = 1200;
+const GOAL_POOL_CACHE_MS = 30 * 60 * 1000;
 
-export function getGoalPool(difficulty: Difficulty): string[] {
-  return GOAL_POOL[difficulty];
+interface GoalPoolState {
+  pools: Record<Difficulty, string[]>;
+  expiresAt: number;
 }
 
-export function pickGoalTitle(difficulty: Difficulty): string {
-  const pool = GOAL_POOL[difficulty];
+declare global {
+  var __goalPoolState: GoalPoolState | undefined;
+}
+
+let goalPoolState = globalThis.__goalPoolState;
+globalThis.__goalPoolState = goalPoolState;
+
+function shuffle<T>(items: T[]): T[] {
+  const list = [...items];
+
+  for (let index = list.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const current = list[index];
+    list[index] = list[swapIndex];
+    list[swapIndex] = current;
+  }
+
+  return list;
+}
+
+function ensurePoolSize(pool: string[], fallback: string[]): string[] {
+  if (pool.length >= MIN_GOAL_POOL_SIZE) {
+    return pool;
+  }
+
+  return unique([...pool, ...fallback]);
+}
+
+async function buildGoalPools(): Promise<Record<Difficulty, string[]>> {
+  const expanded = await fetchExpandedGoalTitles(MIN_GOAL_POOL_SIZE + 300);
+  const randomExpanded = shuffle(expanded);
+  const commonSeed = unique([...EASY_GOALS, ...NORMAL_GOALS, ...HARD_GOALS]);
+
+  const easy = ensurePoolSize(
+    unique([...EASY_GOALS, ...NORMAL_GOALS, ...randomExpanded, ...commonSeed]),
+    randomExpanded
+  );
+  const normal = ensurePoolSize(
+    unique([...NORMAL_GOALS, ...HARD_GOALS, ...randomExpanded, ...commonSeed]),
+    randomExpanded
+  );
+  const hard = ensurePoolSize(
+    unique([...HARD_GOALS, ...randomExpanded, ...NORMAL_GOALS, ...commonSeed]),
+    randomExpanded
+  );
+
+  return {
+    easy,
+    normal,
+    hard,
+  };
+}
+
+export async function getGoalPool(difficulty: Difficulty): Promise<string[]> {
+  if (goalPoolState && goalPoolState.expiresAt > Date.now()) {
+    const cachedPool = goalPoolState.pools[difficulty];
+
+    if (Array.isArray(cachedPool) && cachedPool.length >= MIN_GOAL_POOL_SIZE) {
+      return cachedPool;
+    }
+  }
+
+  const pools = await buildGoalPools();
+  const nextState: GoalPoolState = {
+    pools,
+    expiresAt: Date.now() + GOAL_POOL_CACHE_MS,
+  };
+
+  goalPoolState = nextState;
+  globalThis.__goalPoolState = nextState;
+
+  return nextState.pools[difficulty];
+}
+
+export async function pickGoalTitle(difficulty: Difficulty): Promise<string> {
+  const pool = await getGoalPool(difficulty);
+
+  if (pool.length === 0) {
+    throw new Error("Goal pool is empty");
+  }
+
   const index = Math.floor(Math.random() * pool.length);
   return pool[index];
 }
-

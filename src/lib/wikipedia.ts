@@ -5,6 +5,9 @@ const WIKI_API = "https://ja.wikipedia.org/w/api.php";
 const ARTICLE_CACHE_MS = 10 * 60 * 1000;
 const BACKLINK_CACHE_MS = 5 * 60 * 1000;
 const EDGE_CACHE_MS = 5 * 60 * 1000;
+const TITLE_CACHE_MS = 30 * 60 * 1000;
+const GOAL_POOL_CACHE_MS = 6 * 60 * 60 * 1000;
+const ALL_PAGES_BATCH_LIMIT = 500;
 const WIKI_TIMEOUT_MS = 12_000;
 const WIKI_MAX_RETRIES = 4;
 const WIKI_MIN_INTERVAL_MS = 180;
@@ -60,19 +63,45 @@ interface ArticleResponse {
   };
 }
 
+interface TitleResponse {
+  query?: {
+    pages?: Array<{
+      title: string;
+      missing?: boolean;
+    }>;
+  };
+}
+
+interface AllPagesResponse {
+  query?: {
+    allpages?: Array<{
+      title: string;
+    }>;
+  };
+  continue?: {
+    apcontinue?: string;
+  };
+}
+
 declare global {
   var __wikiRateGate: WikiRateGate | undefined;
+  var __wikiGoalPoolCache: CacheEntry<string[]> | undefined;
+  var __wikiTitleCache: Map<string, CacheEntry<string>> | undefined;
   var __wikiArticleCache: Map<string, CacheEntry<ArticleSnapshot>> | undefined;
   var __wikiBacklinkCache: Map<string, CacheEntry<string[]>> | undefined;
   var __wikiEdgeCache: Map<string, CacheEntry<boolean>> | undefined;
 }
 
 const wikiRateGate = globalThis.__wikiRateGate ?? { nextAt: 0, blockedUntil: 0 };
+let goalPoolCache = globalThis.__wikiGoalPoolCache;
+const titleCache = globalThis.__wikiTitleCache ?? new Map<string, CacheEntry<string>>();
 const articleCache = globalThis.__wikiArticleCache ?? new Map<string, CacheEntry<ArticleSnapshot>>();
 const backlinkCache = globalThis.__wikiBacklinkCache ?? new Map<string, CacheEntry<string[]>>();
 const edgeCache = globalThis.__wikiEdgeCache ?? new Map<string, CacheEntry<boolean>>();
 
 globalThis.__wikiRateGate = wikiRateGate;
+globalThis.__wikiGoalPoolCache = goalPoolCache;
+globalThis.__wikiTitleCache = titleCache;
 globalThis.__wikiArticleCache = articleCache;
 globalThis.__wikiBacklinkCache = backlinkCache;
 globalThis.__wikiEdgeCache = edgeCache;
@@ -234,6 +263,33 @@ export function toArticleUrl(title: string): string {
   return `https://ja.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`;
 }
 
+export async function resolveCanonicalTitle(title: string): Promise<string> {
+  const normalizedTitle = normalizeTitle(title);
+  const cached = titleCache.get(normalizedTitle);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const json = await fetchWikiJson<TitleResponse>({
+    action: "query",
+    titles: normalizedTitle,
+  });
+
+  const page = json?.query?.pages?.[0];
+
+  if (!page || page.missing) {
+    throw new Error(`Article not found: ${title}`);
+  }
+
+  const canonicalTitle = normalizeTitle(page.title);
+  const expiresAt = Date.now() + TITLE_CACHE_MS;
+  titleCache.set(normalizedTitle, { value: canonicalTitle, expiresAt });
+  titleCache.set(canonicalTitle, { value: canonicalTitle, expiresAt });
+
+  return canonicalTitle;
+}
+
 export async function fetchRandomTitle(): Promise<string> {
   const json = await fetchWikiJson<RandomResponse>({
     action: "query",
@@ -249,6 +305,66 @@ export async function fetchRandomTitle(): Promise<string> {
   }
 
   return normalizeTitle(randomTitle);
+}
+
+export async function fetchExpandedGoalTitles(minCount = 1200): Promise<string[]> {
+  if (goalPoolCache && goalPoolCache.expiresAt > Date.now() && goalPoolCache.value.length >= minCount) {
+    return goalPoolCache.value;
+  }
+
+  const collectedTitles = goalPoolCache?.value ? [...goalPoolCache.value] : [];
+  let apcontinue: string | undefined;
+  let allPageFetchCount = 0;
+
+  while (collectedTitles.length < minCount && allPageFetchCount < 8) {
+    const json = await fetchWikiJson<AllPagesResponse>({
+      action: "query",
+      list: "allpages",
+      apnamespace: "0",
+      apfilterredir: "nonredirects",
+      aplimit: String(ALL_PAGES_BATCH_LIMIT),
+      ...(apcontinue ? { apcontinue } : {}),
+    });
+
+    const chunk = (json?.query?.allpages ?? []).map((item) => item.title);
+    collectedTitles.push(...chunk);
+    allPageFetchCount += 1;
+
+    if (!json?.continue?.apcontinue) {
+      break;
+    }
+
+    apcontinue = json.continue.apcontinue;
+  }
+
+  let randomFetchCount = 0;
+
+  while (collectedTitles.length < minCount && randomFetchCount < 6) {
+    const randomJson = await fetchWikiJson<RandomResponse>({
+      action: "query",
+      list: "random",
+      rnnamespace: "0",
+      rnlimit: "max",
+    });
+
+    const chunk = (randomJson?.query?.random ?? [])
+      .map((item) => item.title ?? "")
+      .filter((title) => title.length > 0);
+    collectedTitles.push(...chunk);
+    randomFetchCount += 1;
+  }
+
+  const cleaned = cleanTitles(collectedTitles);
+
+  if (cleaned.length === 0) {
+    throw new Error("Failed to fetch expanded goal titles");
+  }
+
+  const result = cleaned.slice(0, Math.max(minCount, 1800));
+  goalPoolCache = { value: result, expiresAt: Date.now() + GOAL_POOL_CACHE_MS };
+  globalThis.__wikiGoalPoolCache = goalPoolCache;
+
+  return result;
 }
 
 export async function fetchBacklinks(title: string, limit = 200): Promise<string[]> {
