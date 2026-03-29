@@ -646,6 +646,53 @@
     return { room: nextRoom, changed };
   }
 
+  async function finalizeVersusGoalFromCurrentTitle(roomId, room, currentTitle) {
+    const normalizedCurrentTitle = normalizeTitle(currentTitle);
+    const goalTitle = normalizeTitle(room?.challenge?.goalTitle || "");
+    const roomMe = room?.me ?? getMyPlayerFromRoom(room);
+    const raceActive = Boolean(
+      room
+      && room.status === "running"
+      && room.startAt
+      && nowMs() >= room.startAt
+      && goalTitle
+    );
+
+    if (!raceActive || !state.versus.playerId || !normalizedCurrentTitle) {
+      return { room, changed: false };
+    }
+
+    if (!titlesMatch(normalizedCurrentTitle, goalTitle) || roomMe?.finishedAt) {
+      return { room, changed: false };
+    }
+
+    const moveResult = await apiFetch(`/api/room/${roomId}/move`, {
+      method: "POST",
+      body: {
+        playerId: state.versus.playerId,
+        currentTitle: normalizedCurrentTitle,
+      },
+    });
+
+    const nextRoom = moveResult.room;
+    const nextMe = nextRoom?.me ?? getMyPlayerFromRoom(nextRoom);
+    let changed = true;
+
+    if (!state.versus.localFinishedAt) {
+      state.versus.localFinishedAt = nowMs();
+      changed = true;
+    }
+
+    if (nextMe?.currentTitle && Array.isArray(nextMe.path) && nextMe.path.length > 0) {
+      if (reconcileLocalPathWithServerPath(nextMe.path, nextMe.currentTitle)) {
+        changed = true;
+      }
+    }
+
+    setNotice("現在ページでゴール到達を同期");
+    return { room: nextRoom, changed };
+  }
+
   function statusTextForSolo() {
     if (!state.solo.challenge) {
       return "チャレンジ未生成";
@@ -823,9 +870,17 @@
       let changed = maybeResetVersusRound(room);
 
       if (applyMove && currentTitle && room && room.status === "running" && room.startAt && nowMs() >= room.startAt) {
-        const syncResult = await syncVersusMovesFromLocalPath(roomId, room);
-        room = syncResult.room;
-        changed = syncResult.changed || changed;
+        const finalizeResult = await finalizeVersusGoalFromCurrentTitle(roomId, room, currentTitle);
+        room = finalizeResult.room;
+        changed = finalizeResult.changed || changed;
+
+        const meAfterFinalize = room?.me ?? getMyPlayerFromRoom(room);
+
+        if (!meAfterFinalize?.finishedAt) {
+          const syncResult = await syncVersusMovesFromLocalPath(roomId, room);
+          room = syncResult.room;
+          changed = syncResult.changed || changed;
+        }
       }
 
       const meFromRoom = room?.me ?? getMyPlayerFromRoom(room);

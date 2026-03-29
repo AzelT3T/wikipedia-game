@@ -101,7 +101,7 @@ export default function Home() {
         <p className="muted">
           スタート記事からゴール記事まで、Wikipedia内部リンクだけで到達するタイムを競うゲームです。
           <br />
-          ゴールは著名語寄り、スタートは難解語を含むランダム性を持たせています。
+          スタートもゴールも Wikipedia の記事からランダムに選ばれ、難易度は想定リンク数で調整します。
         </p>
       </section>
 

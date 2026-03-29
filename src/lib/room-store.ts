@@ -40,6 +40,10 @@ function createRoomId(): string {
   return `${newId(4)}${Date.now().toString(36).slice(-4)}`;
 }
 
+function normalizeTitle(title: string): string {
+  return title.replace(/_/g, " ").trim();
+}
+
 function createPlayer(name: string, startTitle: string): RoomPlayer {
   const safeName = name.trim().slice(0, 20) || "Player";
 
@@ -140,7 +144,7 @@ export function setPlayerReady(roomId: string, playerId: string, ready: boolean)
   return room;
 }
 
-export function applyPlayerMove(roomId: string, playerId: string, nextTitle: string): Room {
+function getActiveRoomPlayer(roomId: string, playerId: string) {
   const room = getRoom(roomId);
 
   if (!room) {
@@ -161,23 +165,63 @@ export function applyPlayerMove(roomId: string, playerId: string, nextTitle: str
     throw new Error("PLAYER_NOT_FOUND");
   }
 
+  return { room, player };
+}
+
+function finishPlayer(room: Room, player: RoomPlayer, finalTitle: string) {
+  const normalizedFinalTitle = normalizeTitle(finalTitle);
+
+  player.currentTitle = normalizedFinalTitle;
+
+  if (normalizeTitle(player.path[player.path.length - 1] ?? "") !== normalizedFinalTitle) {
+    player.path.push(normalizedFinalTitle);
+  }
+
+  player.clicks = Math.max(player.clicks, Math.max(0, player.path.length - 1));
+  player.finishedAt = Date.now();
+
+  if (!room.winnerId) {
+    room.winnerId = player.id;
+    room.status = "finished";
+  }
+}
+
+export function applyPlayerMove(roomId: string, playerId: string, nextTitle: string): Room {
+  const { room, player } = getActiveRoomPlayer(roomId, playerId);
+
   if (player.finishedAt) {
     return room;
   }
 
-  player.currentTitle = nextTitle;
+  const normalizedNextTitle = normalizeTitle(nextTitle);
+
+  player.currentTitle = normalizedNextTitle;
   player.clicks += 1;
-  player.path.push(nextTitle);
+  player.path.push(normalizedNextTitle);
 
-  if (nextTitle === room.challenge.goalTitle) {
-    player.finishedAt = Date.now();
-
-    if (!room.winnerId) {
-      room.winnerId = player.id;
-      room.status = "finished";
-    }
+  if (normalizedNextTitle === normalizeTitle(room.challenge.goalTitle)) {
+    finishPlayer(room, player, room.challenge.goalTitle);
   }
 
+  return room;
+}
+
+export function applyPlayerGoalFromCurrentTitle(
+  roomId: string,
+  playerId: string,
+  currentTitle: string
+): Room {
+  const { room, player } = getActiveRoomPlayer(roomId, playerId);
+
+  if (player.finishedAt) {
+    return room;
+  }
+
+  if (normalizeTitle(currentTitle) !== normalizeTitle(room.challenge.goalTitle)) {
+    throw new Error("CURRENT_TITLE_IS_NOT_GOAL");
+  }
+
+  finishPlayer(room, player, room.challenge.goalTitle);
   return room;
 }
 

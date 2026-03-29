@@ -1,7 +1,11 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
-import { applyPlayerMove, getRoom } from "@/lib/room-store";
+import { applyPlayerGoalFromCurrentTitle, applyPlayerMove, getRoom } from "@/lib/room-store";
 import { serializeRoomForClient } from "@/lib/room-api";
 import { hasDirectLink, resolveCanonicalTitle } from "@/lib/wikipedia";
+
+function normalizeTitle(title: string): string {
+  return title.replace(/_/g, " ").trim();
+}
 
 export async function POST(
   request: NextRequest,
@@ -13,9 +17,13 @@ export async function POST(
     const body = await request.json();
     const playerId = String(body?.playerId ?? "").trim();
     const toTitle = String(body?.toTitle ?? "").trim();
+    const currentTitle = String(body?.currentTitle ?? "").trim();
 
-    if (!playerId || !toTitle) {
-      return NextResponse.json({ error: "playerId and toTitle are required" }, { status: 400 });
+    if (!playerId || (!toTitle && !currentTitle)) {
+      return NextResponse.json(
+        { error: "playerId and (toTitle or currentTitle) are required" },
+        { status: 400 }
+      );
     }
 
     const room = getRoom(roomId);
@@ -28,6 +36,23 @@ export async function POST(
 
     if (!player) {
       return NextResponse.json({ error: "PLAYER_NOT_FOUND" }, { status: 404 });
+    }
+
+    if (currentTitle) {
+      const canonicalCurrentTitle = await resolveCanonicalTitle(currentTitle);
+
+      if (normalizeTitle(canonicalCurrentTitle) === normalizeTitle(room.challenge.goalTitle)) {
+        const updated = applyPlayerGoalFromCurrentTitle(roomId, playerId, canonicalCurrentTitle);
+
+        return NextResponse.json({
+          accepted: true,
+          room: serializeRoomForClient(updated),
+        });
+      }
+    }
+
+    if (!toTitle) {
+      return NextResponse.json({ error: "CURRENT_TITLE_IS_NOT_GOAL" }, { status: 400 });
     }
 
     const canonicalCurrentTitle = await resolveCanonicalTitle(player.currentTitle);
@@ -55,7 +80,9 @@ export async function POST(
     const status =
       message === "ROOM_NOT_FOUND" || message === "PLAYER_NOT_FOUND"
         ? 404
-        : message === "ROOM_NOT_RUNNING" || message === "RACE_NOT_STARTED"
+        : message === "ROOM_NOT_RUNNING"
+            || message === "RACE_NOT_STARTED"
+            || message === "CURRENT_TITLE_IS_NOT_GOAL"
           ? 400
           : isWikiRateLimited
             ? 503

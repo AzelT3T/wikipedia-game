@@ -6,8 +6,8 @@ const ARTICLE_CACHE_MS = 10 * 60 * 1000;
 const BACKLINK_CACHE_MS = 5 * 60 * 1000;
 const EDGE_CACHE_MS = 5 * 60 * 1000;
 const TITLE_CACHE_MS = 30 * 60 * 1000;
-const GOAL_POOL_CACHE_MS = 6 * 60 * 60 * 1000;
-const ALL_PAGES_BATCH_LIMIT = 500;
+const GOAL_POOL_CACHE_MS = 10 * 60 * 1000;
+const RANDOM_GOAL_BATCH_LIMIT = 500;
 const WIKI_TIMEOUT_MS = 12_000;
 const WIKI_MAX_RETRIES = 4;
 const WIKI_MIN_INTERVAL_MS = 180;
@@ -72,17 +72,6 @@ interface TitleResponse {
   };
 }
 
-interface AllPagesResponse {
-  query?: {
-    allpages?: Array<{
-      title: string;
-    }>;
-  };
-  continue?: {
-    apcontinue?: string;
-  };
-}
-
 declare global {
   var __wikiRateGate: WikiRateGate | undefined;
   var __wikiGoalPoolCache: CacheEntry<string[]> | undefined;
@@ -130,6 +119,19 @@ function cleanTitles(titles: string[]): string[] {
       .map((title) => normalizeTitle(title))
       .filter((title) => isNavigableTitle(title))
   );
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const list = [...items];
+
+  for (let index = list.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const current = list[index];
+    list[index] = list[swapIndex];
+    list[swapIndex] = current;
+  }
+
+  return list;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -307,44 +309,30 @@ export async function fetchRandomTitle(): Promise<string> {
   return normalizeTitle(randomTitle);
 }
 
-export async function fetchExpandedGoalTitles(minCount = 1200): Promise<string[]> {
+export async function fetchRandomGoalTitles(minCount = 1200): Promise<string[]> {
   if (goalPoolCache && goalPoolCache.expiresAt > Date.now() && goalPoolCache.value.length >= minCount) {
     return goalPoolCache.value;
   }
 
   const collectedTitles = goalPoolCache?.value ? [...goalPoolCache.value] : [];
-  let apcontinue: string | undefined;
-  let allPageFetchCount = 0;
-
-  while (collectedTitles.length < minCount && allPageFetchCount < 8) {
-    const json = await fetchWikiJson<AllPagesResponse>({
-      action: "query",
-      list: "allpages",
-      apnamespace: "0",
-      apfilterredir: "nonredirects",
-      aplimit: String(ALL_PAGES_BATCH_LIMIT),
-      ...(apcontinue ? { apcontinue } : {}),
-    });
-
-    const chunk = (json?.query?.allpages ?? []).map((item) => item.title);
-    collectedTitles.push(...chunk);
-    allPageFetchCount += 1;
-
-    if (!json?.continue?.apcontinue) {
-      break;
-    }
-
-    apcontinue = json.continue.apcontinue;
-  }
-
+  const maxFetchCount = Math.max(
+    6,
+    Math.ceil(Math.max(0, minCount - collectedTitles.length) / RANDOM_GOAL_BATCH_LIMIT) + 4
+  );
   let randomFetchCount = 0;
+  let cleanedCount = cleanTitles(collectedTitles).length;
 
-  while (collectedTitles.length < minCount && randomFetchCount < 6) {
+  while (cleanedCount < minCount && randomFetchCount < maxFetchCount) {
+    const remainingCount = Math.max(1, minCount - cleanedCount);
     const randomJson = await fetchWikiJson<RandomResponse>({
       action: "query",
       list: "random",
       rnnamespace: "0",
-      rnlimit: "max",
+      rnfilterredir: "nonredirects",
+      rnlimit:
+        remainingCount >= RANDOM_GOAL_BATCH_LIMIT
+          ? "max"
+          : String(Math.min(RANDOM_GOAL_BATCH_LIMIT, remainingCount)),
     });
 
     const chunk = (randomJson?.query?.random ?? [])
@@ -352,19 +340,27 @@ export async function fetchExpandedGoalTitles(minCount = 1200): Promise<string[]
       .filter((title) => title.length > 0);
     collectedTitles.push(...chunk);
     randomFetchCount += 1;
+    cleanedCount = cleanTitles(collectedTitles).length;
   }
 
   const cleaned = cleanTitles(collectedTitles);
 
   if (cleaned.length === 0) {
-    throw new Error("Failed to fetch expanded goal titles");
+    throw new Error("Failed to fetch random goal titles");
   }
 
-  const result = cleaned.slice(0, Math.max(minCount, 1800));
+  const result = shuffle(cleaned).slice(
+    0,
+    Math.max(minCount, Math.min(cleaned.length, minCount + 300))
+  );
   goalPoolCache = { value: result, expiresAt: Date.now() + GOAL_POOL_CACHE_MS };
   globalThis.__wikiGoalPoolCache = goalPoolCache;
 
   return result;
+}
+
+export async function fetchExpandedGoalTitles(minCount = 1200): Promise<string[]> {
+  return fetchRandomGoalTitles(minCount);
 }
 
 export async function fetchBacklinks(title: string, limit = 200): Promise<string[]> {
