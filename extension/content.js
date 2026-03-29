@@ -1124,6 +1124,15 @@
     }
 
     await runAction("next-round", async () => {
+      try {
+        await refreshVersusRoom({
+          applyMove: true,
+          currentTitle: currentTitleFromLocation(),
+        });
+      } catch {
+        // If sync is temporarily broken, allow skipping ahead to the next round.
+      }
+
       const response = await apiFetch(`/api/room/${encodeURIComponent(state.versus.roomId)}/next`, {
         method: "POST",
         body: {
@@ -1253,7 +1262,7 @@
     const room = state.versus.room;
     const me = getMyPlayerFromRoom(room);
     const challengeVisible = Boolean(room?.challenge);
-    const canPrepareNextRound = Boolean(state.versus.active && room && room.status !== "running");
+    const canPrepareNextRound = Boolean(state.versus.active && room);
     const myRoomStatusLabel = formatRoomStatus(room?.status);
     const soloPathText = joinedPathText(state.solo.path);
     const versusPathText = joinedPathText(state.versus.localPath);

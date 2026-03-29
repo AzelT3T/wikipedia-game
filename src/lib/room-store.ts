@@ -257,10 +257,6 @@ export function startNextRound(roomId: string, playerId: string, challenge: Chal
     throw new Error("PLAYER_NOT_FOUND");
   }
 
-  if (room.status === "running") {
-    throw new Error("ROOM_IN_PROGRESS");
-  }
-
   room.round += 1;
   room.status = "waiting";
   room.challenge = challenge;

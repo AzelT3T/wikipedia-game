@@ -33,12 +33,7 @@ export async function POST(
     return NextResponse.json({ room: serializeRoomForClient(updated) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to prepare next round";
-    const status =
-      message === "ROOM_NOT_FOUND" || message === "PLAYER_NOT_FOUND"
-        ? 404
-        : message === "ROOM_IN_PROGRESS"
-          ? 400
-          : 500;
+    const status = message === "ROOM_NOT_FOUND" || message === "PLAYER_NOT_FOUND" ? 404 : 500;
 
     return NextResponse.json({ error: message }, { status });
   }
